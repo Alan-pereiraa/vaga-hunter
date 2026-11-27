@@ -1,0 +1,82 @@
+name: vaga-hunter
+
+services:
+  postgres:
+    # Postgres 17 com a extensão pgvector (embeddings de currículo e vagas)
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vagahunter}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vagahunter}
+      POSTGRES_DB: ${POSTGRES_DB:-vagahunter}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailpit:
+    # Captura todos os e-mails enviados em desenvolvimento
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_UI_PORT:-8025}:8025" # interface web
+      - "${MAILPIT_SMTP_PORT:-1025}:1025" # SMTP
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+  backend:
+    build:
+      context: ./backend
+      target: dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    environment:
+      PORT: 3333
+      FRONTEND_URL: http://localhost:${FRONTEND_PORT:-3000}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vagahunter}:${POSTGRES_PASSWORD:-vagahunter}@postgres:5432/${POSTGRES_DB:-vagahunter}?schema=public
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_FROM: ${SMTP_FROM:-"Vaga Hunter <nao-responda@vagahunter.local>"}
+    ports:
+      - "${BACKEND_PORT:-3333}:3333"
+    volumes:
+      - ./backend:/app
+      - backend_node_modules:/app/node_modules
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      # Server Components falam com o backend pela rede interna do Docker
+      API_URL: http://backend:3333/api
+      # O navegador fala com o backend pela porta exposta no host
+      NEXT_PUBLIC_API_URL: http://localhost:${BACKEND_PORT:-3333}/api
+      # Hot reload confiável em Windows/macOS com volumes montados
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+      - frontend_next:/app/.next
+
+volumes:
+  postgres_data:
+  backend_node_modules:
+  frontend_node_modules:
+  frontend_next:

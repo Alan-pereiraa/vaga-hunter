@@ -1,0 +1,348 @@
+// Vaga Hunter — modelo de dados
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider               = "prisma-client"
+  output                 = "../src/generated/prisma"
+  moduleFormat           = "esm"
+  importFileExtension    = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Seniority {
+  INTERNSHIP
+  JUNIOR
+  MID
+  SENIOR
+
+  @@map("seniority")
+}
+
+enum WorkModel {
+  REMOTE
+  HYBRID
+  ONSITE
+
+  @@map("work_model")
+}
+
+enum JobSource {
+  GUPY
+  GREENHOUSE
+  LEVER
+  ASHBY
+  MANUAL
+
+  @@map("job_source")
+}
+
+enum MatchStatus {
+  NEW
+  SAVED
+  DISMISSED
+  APPLIED
+
+  @@map("match_status")
+}
+
+enum ApplicationStage {
+  APPLIED
+  SCREENING
+  INTERVIEW
+  OFFER
+  CLOSED
+
+  @@map("application_stage")
+}
+
+enum ApplicationOutcome {
+  HIRED
+  REJECTED
+  WITHDREW
+  NO_RESPONSE
+
+  @@map("application_outcome")
+}
+
+enum ApplicationEventType {
+  STAGE_CHANGE
+  DEADLINE
+  INTERVIEW
+  NOTE
+
+  @@map("application_event_type")
+}
+
+enum EventAuthor {
+  USER
+  AI
+
+  @@map("event_author")
+}
+
+enum EmailClassification {
+  RECRUITING
+  NOT_RECRUITING
+  NEEDS_REVIEW
+
+  @@map("email_classification")
+}
+
+enum EmailReviewStatus {
+  PENDING
+  CONFIRMED
+  CORRECTED
+  IGNORED
+
+  @@map("email_review_status")
+}
+
+// ─────────────────────────────────────────────
+// Usuário e perfil de busca
+// ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  inboundAlias String   @unique @map("inbound_alias")
+  timezone     String   @default("America/Sao_Paulo")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  searchProfile      SearchProfile?
+  sessions           Session[]
+  passwordResetCodes PasswordResetCode[]
+  jobMatches         JobMatch[]
+  applications  Application[]
+  emails        Email[]
+
+  @@map("users")
+}
+
+model SearchProfile {
+  id              String                       @id @default(uuid()) @db.Uuid
+  userId          String                       @unique @map("user_id") @db.Uuid
+  titles          String[]
+  seniorities     Seniority[]
+  workModels      WorkModel[]                  @map("work_models")
+  locations       String[]
+  stack           String[]
+  sources         JobSource[]
+  resumeText      String?                      @map("resume_text")
+  // Embedding do currículo (pgvector). Lido/escrito via SQL raw.
+  resumeEmbedding Unsupported("vector(1536)")? @map("resume_embedding")
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("search_profiles")
+}
+
+// ─────────────────────────────────────────────
+// Autenticação
+// ─────────────────────────────────────────────
+
+// Uma linha por login (dispositivo/navegador). Guarda o hash do refresh token.
+// Na rotação, a sessão antiga é revogada e aponta para a nova (replacedById):
+// se um token já revogado for reutilizado, revogue a cadeia inteira (roubo).
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  userAgent        String?   @map("user_agent")
+  ipAddress        String?   @map("ip_address")
+  expiresAt        DateTime  @map("expires_at")
+  lastUsedAt       DateTime  @default(now()) @map("last_used_at")
+  revokedAt        DateTime? @map("revoked_at")
+  replacedById     String?   @unique @map("replaced_by_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedBy Session? @relation("SessionRotation", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces   Session? @relation("SessionRotation")
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// Cada envio de código de redefinição de senha. Guarde só o hash do código.
+// `attempts` limita tentativas erradas; `createdAt` permite limitar reenvios.
+model PasswordResetCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  codeHash  String    @map("code_hash")
+  sentTo    String    @map("sent_to")
+  attempts  Int       @default(0)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  ipAddress String?   @map("ip_address")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@map("password_reset_codes")
+}
+
+// ─────────────────────────────────────────────
+// Vagas (compartilhadas entre usuários)
+// ─────────────────────────────────────────────
+
+model Company {
+  id        String     @id @default(uuid()) @db.Uuid
+  name      String
+  domain    String?    @unique
+  ats       JobSource?
+  atsSlug   String?    @map("ats_slug")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  jobs         Job[]
+  applications Application[]
+
+  @@unique([ats, atsSlug])
+  @@map("companies")
+}
+
+model Job {
+  id           String                       @id @default(uuid()) @db.Uuid
+  source       JobSource
+  externalId   String                       @map("external_id")
+  companyId    String?                      @map("company_id") @db.Uuid
+  title        String
+  description  String?
+  location     String?
+  workModel    WorkModel?                   @map("work_model")
+  contractType String?                      @map("contract_type")
+  url          String
+  publishedAt  DateTime?                    @map("published_at")
+  collectedAt  DateTime                     @default(now()) @map("collected_at")
+  closedAt     DateTime?                    @map("closed_at")
+  // Embedding da vaga (pgvector). Lido/escrito via SQL raw.
+  embedding    Unsupported("vector(1536)")?
+
+  company      Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  matches      JobMatch[]
+  applications Application[]
+
+  @@unique([source, externalId])
+  @@index([publishedAt])
+  @@map("jobs")
+}
+
+model JobMatch {
+  id        String      @id @default(uuid()) @db.Uuid
+  userId    String      @map("user_id") @db.Uuid
+  jobId     String      @map("job_id") @db.Uuid
+  score     Float
+  status    MatchStatus @default(NEW)
+  seenAt    DateTime?   @map("seen_at")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, jobId])
+  @@index([userId, status, score])
+  @@map("job_matches")
+}
+
+// ─────────────────────────────────────────────
+// Candidaturas
+// ─────────────────────────────────────────────
+
+model Application {
+  id             String              @id @default(uuid()) @db.Uuid
+  userId         String              @map("user_id") @db.Uuid
+  companyId      String?             @map("company_id") @db.Uuid
+  // Opcional: candidaturas podem nascer de link colado ou de um e-mail
+  jobId          String?             @map("job_id") @db.Uuid
+  // Cópia dos dados da vaga — a vaga pode sumir do portal
+  jobTitle       String              @map("job_title")
+  companyName    String              @map("company_name")
+  url            String?
+  source         JobSource           @default(MANUAL)
+  stage          ApplicationStage    @default(APPLIED)
+  outcome        ApplicationOutcome?
+  appliedAt      DateTime            @default(now()) @map("applied_at")
+  lastActivityAt DateTime            @default(now()) @map("last_activity_at")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  job     Job?     @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  events ApplicationEvent[]
+  emails Email[]
+
+  @@index([userId, stage])
+  @@map("applications")
+}
+
+model ApplicationEvent {
+  id            String               @id @default(uuid()) @db.Uuid
+  applicationId String               @map("application_id") @db.Uuid
+  type          ApplicationEventType
+  stageFrom     ApplicationStage?    @map("stage_from")
+  stageTo       ApplicationStage?    @map("stage_to")
+  description   String?
+  dueAt         DateTime?            @map("due_at")
+  scheduledAt   DateTime?            @map("scheduled_at")
+  emailId       String?              @map("email_id") @db.Uuid
+  createdBy     EventAuthor          @default(USER) @map("created_by")
+  createdAt     DateTime             @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  email       Email?      @relation(fields: [emailId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId, createdAt])
+  @@index([dueAt])
+  @@index([scheduledAt])
+  @@map("application_events")
+}
+
+// ─────────────────────────────────────────────
+// E-mails do processo seletivo
+// ─────────────────────────────────────────────
+
+model Email {
+  id             String               @id @default(uuid()) @db.Uuid
+  userId         String               @map("user_id") @db.Uuid
+  // Message-ID do cabeçalho — evita processar o mesmo e-mail duas vezes
+  messageId      String               @unique @map("message_id")
+  fromAddress    String               @map("from_address")
+  subject        String
+  receivedAt     DateTime             @map("received_at")
+  // Pode ser apagado após o prazo de retenção (LGPD), mantendo só `extracted`
+  bodyText       String?              @map("body_text")
+  classification EmailClassification  @default(NEEDS_REVIEW)
+  confidence     Float?
+  // Saída estruturada do LLM: empresa, vaga, etapa, prazos, ação pedida
+  extracted      Json?
+  applicationId  String?              @map("application_id") @db.Uuid
+  reviewStatus   EmailReviewStatus    @default(PENDING) @map("review_status")
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  application Application?       @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  events      ApplicationEvent[]
+
+  @@index([userId, reviewStatus])
+  @@index([userId, receivedAt])
+  @@map("emails")
+}
